@@ -5,7 +5,6 @@
 Traffic Counter Enterprise MAX — CLEAN BUILD (v5)
 - 전면 정리: 자동정지/책갈피/구간자동멈춤 관련 기능과 버튼, 마커슬라이더 완전 제거
 - 핵심 유지: 로그인/권한, 15분 슬롯 카운팅, 단축키(방향/차종), 파일/폴더, 시트/엑셀 저장, 로그 내보내기
-- gitsdfdsfdsfsdf
 """
 import os, sys, re, sqlite3, hashlib, json
 
@@ -2519,6 +2518,51 @@ def build_site_hotkeys_from_cfg(cfg, site_obj=None):
     except Exception:
         return {"vehicle_names": [], "by_dir": {}}
 
+def build_hotkey_keymap_from_site_json(site_json: dict, vehicle_count: int) -> Dict[str, List[Tuple[int,int]]]:
+    """
+    site json에 저장된 site_hotkeys를 "키(대문자) -> [(direction_index0based, vehicle_index0based), ...]" 형태로 변환.
+    - 우선순위: site_json["site"]["site_hotkeys"] -> site_json["site_hotkeys"] -> site_json["dir_hotkeys"]
+    - direction_index0based: 0..11
+    - vehicle_index0based: 0..vehicle_count-1
+    """
+    key_map: Dict[str, List[Tuple[int,int]]] = {}
+    if not isinstance(site_json, dict):
+        return key_map
+
+    site_obj = site_json.get("site") if isinstance(site_json.get("site"), dict) else site_json
+    by_dir = None
+    for k in ("site_hotkeys", "dir_hotkeys"):
+        if isinstance(site_obj.get(k), dict):
+            by_dir = site_obj.get(k)
+            break
+    if by_dir is None:
+        for k in ("site_hotkeys", "dir_hotkeys"):
+            if isinstance(site_json.get(k), dict):
+                by_dir = site_json.get(k)
+                break
+    if not isinstance(by_dir, dict):
+        return key_map
+
+    vc = max(0, int(vehicle_count or 0))
+    for dir_key, keys in by_dir.items():
+        try:
+            dnum = int(str(dir_key).strip())
+        except Exception:
+            continue
+        if not (1 <= dnum <= 12):
+            continue
+        if not isinstance(keys, list):
+            continue
+        for vi, key in enumerate(keys[:vc]):
+            if not key:
+                continue
+            k = str(key).strip().upper()
+            if not k:
+                continue
+            key_map.setdefault(k, []).append((dnum-1, vi))
+    return key_map
+
+
 def _update_envdb_site_hotkeys_on_disk(info_obj, site_obj, hotkeys_payload):
     """env_data_plus_allinone.json 내부의 해당 과업/지점에 site_hotkeys를 기록(가능한 경우).
     실패해도 예외를 올리지 않습니다.
@@ -3607,6 +3651,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.siteCombo.addItem(label, tidx)
 
             self.siteCombo.blockSignals(False)
+            # 과업 변경 시 첫 지점을 기본 선택하고 즉시 적용
+            try:
+                if self.siteCombo.count() > 0:
+                    self.siteCombo.setCurrentIndex(0)
+            except Exception:
+                pass
+            try:
+                self._on_env_site_changed(0)
+            except Exception:
+                pass
+
 
             # auto select first
             if self.siteCombo.count() > 0:
@@ -3652,6 +3707,14 @@ class MainWindow(QtWidgets.QMainWindow):
             if hasattr(self, "siteEdit"):
                 # 지번_지점명
                 self.siteEdit.setText(str(label))
+            # 선택 즉시 계수화면에 반영 (지점 이동 후 'OK 눌러야 적용' 문제 방지)
+            if not getattr(self, "_env_applying", False):
+                try:
+                    self._env_applying = True
+                    self.apply_env_selection(sidx, tidx)
+                finally:
+                    self._env_applying = False
+
         except Exception:
             pass
 
@@ -3957,6 +4020,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.siteCombo.addItem(label, tidx)
 
             self.siteCombo.blockSignals(False)
+            # 과업 변경 시 첫 지점을 기본 선택하고 즉시 적용
+            try:
+                if self.siteCombo.count() > 0:
+                    self.siteCombo.setCurrentIndex(0)
+            except Exception:
+                pass
+            try:
+                self._on_env_site_changed(0)
+            except Exception:
+                pass
+
 
             # auto select first
             if self.siteCombo.count() > 0:
@@ -4002,6 +4076,14 @@ class MainWindow(QtWidgets.QMainWindow):
             if hasattr(self, "siteEdit"):
                 # 지번_지점명
                 self.siteEdit.setText(str(label))
+            # 선택 즉시 계수화면에 반영 (지점 이동 후 'OK 눌러야 적용' 문제 방지)
+            if not getattr(self, "_env_applying", False):
+                try:
+                    self._env_applying = True
+                    self.apply_env_selection(sidx, tidx)
+                finally:
+                    self._env_applying = False
+
         except Exception:
             pass
 
@@ -6926,17 +7008,36 @@ QSlider::handle:horizontal { width:12px; height:12px; margin:-4px 0; border-radi
             # key(대문자) -> [(direction_index, vehicle_index), ...]
             key_map: Dict[str, List[Tuple[int,int]]] = {}
 
-            for d in enabled_dirs:
-                if d >= len(self.cfg.dir_hotkeys):
-                    continue
-                keys = self.cfg.dir_hotkeys[d]
-                if d in (9,10,11):
-                    dlog(f"install_hotkeys: using dir {d+1} keys={keys}")
-                for vi, key in enumerate(keys[:vc]):
-                    if not key:
+            # 1) site json에서 만든 런타임 keymap이 있으면 우선 사용 (2단계 핵심)
+            base_map = getattr(self, "_site_hotkey_keymap", None)
+            if isinstance(base_map, dict) and base_map:
+                enabled_set = set(enabled_dirs)
+                for k, pairs in base_map.items():
+                    if not k or not isinstance(pairs, list):
                         continue
-                    k = key.upper()
-                    key_map.setdefault(k, []).append((d, vi))
+                    kk = str(k).strip().upper()
+                    if not kk:
+                        continue
+                    for d, vi in pairs:
+                        try:
+                            d = int(d); vi = int(vi)
+                        except Exception:
+                            continue
+                        if d in enabled_set and 0 <= vi < vc:
+                            key_map.setdefault(kk, []).append((d, vi))
+            else:
+                # 2) fallback: cfg.dir_hotkeys 기반 (기존 로직)
+                for d in enabled_dirs:
+                    if d >= len(self.cfg.dir_hotkeys):
+                        continue
+                    keys = self.cfg.dir_hotkeys[d]
+                    if d in (9,10,11):
+                        dlog(f"install_hotkeys: using dir {d+1} keys={keys}")
+                    for vi, key in enumerate(keys[:vc]):
+                        if not key:
+                            continue
+                        k = key.upper()
+                        key_map.setdefault(k, []).append((d, vi))
 
             def make_handler(key: str, delta: int):
                 def _handler():
@@ -7646,9 +7747,18 @@ class UserManagerDialog(QtWidgets.QDialog):
         self.apply_env_selection(0, 0)
 
     def open_env_hotkeys_db(self):
-        """환경설정(과업/지점) 목록을 로드하여 상단 콤보를 채웁니다."""
+        """환경설정(과업/지점) 목록을 로드하여 상단 콤보를 채웁니다.
+        - env_data_plus_allinone.json : 과업/지점 정본
+        - hotkeys_db.json            : 보조(향후 override)
+        """
+        # envdb를 먼저 로드(없으면 apply_env_selection이 빈 DB로 종료됨)
+        try:
+            self.envdb = load_env_db() or {}
+        except Exception:
+            self.envdb = {}
         try:
             self.hkdb = load_hotkeys_db()
+
         except Exception:
             self.hkdb = {}
 
@@ -8201,6 +8311,17 @@ class UserManagerDialog(QtWidgets.QDialog):
                 self.siteCombo.addItem(label, tidx)
 
             self.siteCombo.blockSignals(False)
+            # 과업 변경 시 첫 지점을 기본 선택하고 즉시 적용
+            try:
+                if self.siteCombo.count() > 0:
+                    self.siteCombo.setCurrentIndex(0)
+            except Exception:
+                pass
+            try:
+                self._on_env_site_changed(0)
+            except Exception:
+                pass
+
 
             # auto select first
             if self.siteCombo.count() > 0:
@@ -8246,6 +8367,14 @@ class UserManagerDialog(QtWidgets.QDialog):
             if hasattr(self, "siteEdit"):
                 # 지번_지점명
                 self.siteEdit.setText(str(label))
+            # 선택 즉시 계수화면에 반영 (지점 이동 후 'OK 눌러야 적용' 문제 방지)
+            if not getattr(self, "_env_applying", False):
+                try:
+                    self._env_applying = True
+                    self.apply_env_selection(sidx, tidx)
+                finally:
+                    self._env_applying = False
+
         except Exception:
             pass
 
@@ -9505,6 +9634,27 @@ def _mw_apply_env_selection_v18(self):
                 dlog(f"[WARN] sync_sitejson_hotkeys_from_env failed: {e}")
 
             _mw_apply_site_json_to_cfg_v26(self, site_json)
+            # (v2-step2) site json -> hotkey keymap 주입 (계수프로그램 런타임에서 직접 사용)
+            try:
+                vc = int(getattr(self.cfg, "vehicle_count", lambda: 6)() or 6)
+            except Exception:
+                vc = 6
+            try:
+                self._site_hotkey_keymap = build_hotkey_keymap_from_site_json(site_json, vc)
+                dlog(f"[DBG] injected _site_hotkey_keymap keys={len(self._site_hotkey_keymap)}")
+            except Exception as e:
+                dlog(f"[WARN] build_hotkey_keymap_from_site_json failed: {e}")
+                self._site_hotkey_keymap = {}
+            # 단축키/라벨 즉시 재설치 (지점 이동 후 'OK 눌러야 적용' 문제 방지)
+            try:
+                self.install_hotkeys(reinstall=True)
+            except Exception:
+                pass
+            try:
+                self._refresh_bottom_hotkey_labels()
+            except Exception:
+                pass
+
             try:
                 dlog(f"after apply_site_json_to_cfg: 10={self.cfg.dir_hotkeys[9]} 11={self.cfg.dir_hotkeys[10]} 12={self.cfg.dir_hotkeys[11]}")
             except Exception:
