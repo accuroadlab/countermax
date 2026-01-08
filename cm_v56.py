@@ -5,7 +5,7 @@
 Traffic Counter Enterprise MAX — CLEAN BUILD (v5)
 - 전면 정리: 자동정지/책갈피/구간자동멈춤 관련 기능과 버튼, 마커슬라이더 완전 제거
 - 핵심 유지: 로그인/권한, 15분 슬롯 카운팅, 단축키(방향/차종), 파일/폴더, 시트/엑셀 저장, 로그 내보내기
-- git 사용법을 위한 주석 추가 
+- gitsdfdsfdsfsdf
 """
 import os, sys, re, sqlite3, hashlib, json
 
